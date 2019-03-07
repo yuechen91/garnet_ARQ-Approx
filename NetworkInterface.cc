@@ -201,6 +201,53 @@ NetworkInterface::wakeup()
     MsgPtr msg_ptr;
     Tick curTime = clockEdge();
 
+/*****************send ACK packet*****************************/
+
+    for(int vnet = 0; vnet < inNode_ptr.size();++vnet){
+	    if(ackQueue.empty() == false){
+		    flit * fl = ackQueue.front();
+		    int vc = calculateVC(vnet);
+		    if(vc != -1){
+			    fl -> set_vc(vc);
+			    RouteInfo route=fl->get_route();
+			    route.vnet = vnet;
+			    fl-> set_route(route);
+			    fl->set_vnet(vnet);
+			    m_ni_out_vcs[vc]->insert(fl);
+			    m_ni_out_vcs_enqueue_time[vc]=curCycle();
+			    m_out_vc_state[vc]->setState(ACTIVE_,curCycle());
+			    ackQueue.erase(ackQueue.begin());
+			    m_net_ptr->increment_injected_packets(vnet);
+			    m_net_ptr->increment_injected_flits(vnet);
+
+//			    cout<<"send flit ="<<fl->get_ack()<<endl;
+		    }
+	    }
+    }
+    if(Retran_Buffer.empty() == false){
+	    retransmission pkt;
+	    pkt = Retran_Buffer.front();
+	    Message *net_msg_ptr = pkt.message.get();
+	    int vnet = pkt.route.vnet;
+	    int num_flits = (int)ceil ((double) m_net_ptr -> MessageSizeType_to_int(
+			    net_msg_ptr -> getMessageSize())/m_net_ptr -> getNiFlitSize());
+	    int vc=calculateVC(vnet);
+	    if(vc != 1){
+		    m_net_ptr -> increment_injected_packets(vnet);
+		    for(int i = 0; i<num_flits; i++){
+			    m_net_ptr -> increment_injected_flits(vnet);
+			    flit *fl = new flit(i,vc,vnet,pkt.route,num_flits,pkt.flit,curCycle(), pkt.protection , RETRAN__);
+			    fl->set_src_delay(curCycle() - ticksToCycles(pkt.message->getTime()));
+			    m_ni_out_vcs[vc]->insert(fl);
+		    }
+
+		    m_ni_out_vcs_enqueue_time[vc] = curCycle();
+		    m_out_vc_state[vc] -> setState(ACTIVE_,curCycle());
+		    Retran_Buffer.erase(Retran_Buffer.begin());
+//		    cout<<"retransmit the packet"<<endl;
+	    }
+    }	    
+
     // Checking for messages coming from the protocol
     // can pick up a message/cycle for each virtual net
     for (int vnet = 0; vnet < inNode_ptr.size(); ++vnet) {
@@ -229,16 +276,95 @@ NetworkInterface::wakeup()
         flit *t_flit = inNetLink->consumeLink();
         int vnet = t_flit->get_vnet();
         t_flit->set_dequeue_time(curCycle());
+	
+	if(t_flit->get_ack() == ACK__){
+		sendCredit(t_flit,true);
+		for(int i=0; i < ARQ_Buffer.size();i++){
+			if(ARQ_Buffer[i].flit == t_flit -> get_msg_ptr()){
+				ARQ_Buffer.erase(ARQ_Buffer.begin()+i);
+				//remove packet from the ARQ buffer
+			}
+		}
+		incrementStats(t_flit);
+		delete t_flit;
+	}
+	else if(t_flit->get_ack()==NACK__){
+		sendCredit(t_flit,true);
+//		cout<<"received NACK"<<end;
+		for(int i=0; i< ARQ_Buffer.size();i++){
+			if(ARQ_Buffer[i].flit == t_flit->get_msg_ptr()){
+				Retran_Buffer.push_back(ARQ_Buffer[i]);
+//				cout<<"remove NACK"<<endl;
+				//Add packet to the reransmission buffer
+			}
+		}
+		incrementStats(t_flit);
+		delete t_flit;
+	}
 
+	else{
         // If a tail flit is received, enqueue into the protocol buffers if
         // space is available. Otherwise, exchange non-tail flits for credits.
         if (t_flit->get_type() == TAIL_ || t_flit->get_type() == HEAD_TAIL_) {
             if (!messageEnqueuedThisCycle &&
                 outNode_ptr[vnet]->areNSlotsAvailable(1, curTime)) {
                 // Space is available. Enqueue to protocol buffer.
-                outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(), curTime,
-                                           cyclesToTicks(Cycles(1)));
+       //         outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(), curTime,
+       //                                    cyclesToTicks(Cycles(1)));
+/**************************Create ACK/NACK Packet***************************/
+		NetDest personal_dest;
+		NodeID destID=t_flit -> get_route().src_ni;
+		for(int m = 0; m < (int) MachineType_NUM; m++){
+			if((destID >= MachineType_base_number((MachineType) m   )) &&
+			   (destID <  MachineType_base_number((MachineType)(m+1))) ){
+				personal_dest.clear();
+				personal_dest.add((MachineID){(MachineType)m, (destID - 
+					       MachineType_base_number((MachineType)m))});
+				break;
+			}
+		}
+			
+		RouteInfo route;
+		int vc=calculateVC(t_flit->get_vnet());
+		route.vnet = t_flit->get_vnet();
+		route.net_dest = personal_dest;
+		route.src_ni = t_flit -> get_route().dest_ni;
+		route.src_router = t_flit -> get_route().dest_router;
+		route.dest_ni = t_flit -> get_route().src_ni;
+		route.dest_router = t_flit -> get_route().src_router;
+		route.hops_traversed = -1;
 
+		m_net_ptr -> increment_injected_packets(route.vnet);
+
+		flit *fl;
+
+
+		if(t_flit -> get_type()==HEAD_TAIL_){
+			fl = new flit(0,vc,route.vnet,route,1,t_flit->get_msg_ptr(),curCycle()+Cycles(1),9 ,ACK__);
+			if(t_flit->get_ack() == NORMAL__){
+				outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(),curTime,cyclesToTicks(Cycles(1)));
+			}
+		}
+		else if(rand()%100000<=((1-pow(1-error_rate,t_flit->get_route().hops_traversed))*100000)){
+			fl = new flit(0,vc,route.vnet,route,1,t_flit->get_msg_ptr(),curCycle()+Cycles(1),9 ,NACK__);
+			if(t_flit->get_ack() == NORMAL__){
+				outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(), curTime, cyclesToTicks(Cycles(1)));
+//				cout<<"packet protection ="<<t_flit->get_protect()<<endl;
+			}
+//			cout<<"created NACK packet"<<endl;
+		}
+		else{
+			fl = new flit(0,vc,route.vnet,route,1,t_flit->get_msg_ptr(),curCycle()+Cycles(1),9 ,ACK__);
+			if(t_flit->get_ack() == NORMAL__){
+				outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(),curTime,cyclesToTicks(Cycles(1)));
+			}
+		}
+
+		fl->set_src_delay(Cycles(1));
+		ackQueue.push_back(fl);
+
+
+/******************************END******************************************/
                 // Simply send a credit back since we are not buffering
                 // this flit in the NI
                 sendCredit(t_flit, true);
@@ -263,7 +389,9 @@ NetworkInterface::wakeup()
             // Update stats and delete flit pointer.
             incrementStats(t_flit);
             delete t_flit;
-        }
+          }
+    
+	}
     }
 
     /****************** Check the incoming credit link *******/
@@ -308,9 +436,60 @@ NetworkInterface::checkStallQueue()
 
             // If we can now eject to the protocol buffer, send back credits
             if (outNode_ptr[vnet]->areNSlotsAvailable(1, curTime)) {
-                outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(), curTime,
-                                           cyclesToTicks(Cycles(1)));
+/****************************Create ack Flit**************************/
+		NetDest personal_dest;
+		NodeID destID=stallFlit -> get_route().src_ni;
+		for(int m = 0; m < (int) MachineType_NUM; m++){
+			if((destID >= MachineType_base_number((MachineType) m   )) &&
+			   (destID <  MachineType_base_number((MachineType)(m+1))) ){
+				personal_dest.clear();
+				personal_dest.add((MachineID){(MachineType)m, (destID - 
+					       MachineType_base_number((MachineType)m))});
+				break;
+			}
+		}
+			
+		RouteInfo route;
+		int vc=calculateVC(stallFlit->get_vnet());
+		route.vnet = stallFlit->get_vnet();
+		route.net_dest = personal_dest;
+		route.src_ni = stallFlit -> get_route().dest_ni;
+		route.src_router = stallFlit -> get_route().dest_router;
+		route.dest_ni = stallFlit -> get_route().src_ni;
+		route.dest_router = stallFlit -> get_route().src_router;
+		route.hops_traversed = -1;
 
+		m_net_ptr -> increment_injected_packets(route.vnet);
+
+		flit *fl;
+
+
+		if(stallFlit -> get_type()==HEAD_TAIL_){
+			fl = new flit(0,vc,route.vnet,route,1,stallFlit->get_msg_ptr(),curCycle()+Cycles(1),9,ACK__);
+			if(stallFlit->get_ack() == NORMAL__){
+				outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(),curTime,cyclesToTicks(Cycles(1)));
+			}
+		}
+		else if(rand()%100000<=((1-pow(1-error_rate,stallFlit->get_route().hops_traversed))*100000)){
+			fl = new flit(0,vc,route.vnet,route,1,stallFlit->get_msg_ptr(),curCycle()+Cycles(1),9,NACK__);
+			if(stallFlit->get_ack() == NORMAL__){
+				outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(), curTime, cyclesToTicks(Cycles(1)));
+			}
+		}
+		else{
+			fl = new flit(0,vc,route.vnet,route,1,stallFlit->get_msg_ptr(),curCycle()+Cycles(1),9,ACK__);
+			if(stallFlit->get_ack() == NORMAL__){
+				outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(),curTime,cyclesToTicks(Cycles(1)));
+			}
+		}
+
+		fl->set_src_delay(Cycles(1));
+		ackQueue.push_back(fl);
+
+	
+      //          outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(), curTime,
+      //                                     cyclesToTicks(Cycles(1)));
+/**********************************END********************************/
                 // Send back a credit with free signal now that the VC is no
                 // longer stalled.
                 sendCredit(stallFlit, true);
@@ -346,6 +525,7 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
     Message *net_msg_ptr = msg_ptr.get();
     NetDest net_msg_dest = net_msg_ptr->getDestination();
 
+    retransmission retran_pkt;
     // gets all the destinations associated with this message.
     vector<NodeID> dest_nodes = net_msg_dest.getAllDest();
 
@@ -354,26 +534,28 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
     int num_flits = (int) ceil((double) m_net_ptr->MessageSizeType_to_int(net_msg_ptr->getMessageSize())/m_net_ptr->getNiFlitSize());
 
     string protect;
-    int packet_length;
+
 
     if(!std::getline(inputFileHandler , protect)){
 	    inputFileHandler.clear();
 	    inputFileHandler.seekg(0,ios::beg);
     }
+    int protection=9;
+    int approx;
 
     if(std::atoi(protect.c_str())>8){
-	    packet_length = 9;
+	    approx = 9;
     }
     else {
-	    packet_length = std::atoi(protect.c_str())+1;
+	    approx = std::atoi(protect.c_str())+1;
     }
 
 
         if(num_flits == 1){
-		num_flits = 1;
+		protection = 9;
 	}
 	else {
-		num_flits = packet_length;//std::atoi(protect.c_str())+1;
+		protection = approx;
 	}
 
     DPRINTF(RubyNetwork, "Packet length = %d\n", num_flits);
@@ -430,8 +612,7 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
         m_net_ptr->increment_injected_packets(vnet);
         for (int i = 0; i < num_flits; i++) {
             m_net_ptr->increment_injected_flits(vnet);
-            flit *fl = new flit(i, vc, vnet, route, num_flits, new_msg_ptr,
-                curCycle(),NORMAL__);
+            flit *fl = new flit(i, vc, vnet, route, num_flits, new_msg_ptr, curCycle(),protection ,NORMAL__);
 
             fl->set_src_delay(curCycle() - ticksToCycles(msg_ptr->getTime()));
             m_ni_out_vcs[vc]->insert(fl);
@@ -439,7 +620,15 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
 
         m_ni_out_vcs_enqueue_time[vc] = curCycle();
         m_out_vc_state[vc]->setState(ACTIVE_, curCycle());
+
+        retran_pkt.message=msg_ptr;
+        retran_pkt.flit = new_msg_ptr;
+        retran_pkt.route=route;
+        retran_pkt.protection = protection;
     }
+
+
+    ARQ_Buffer.push_back(retran_pkt);
     return true ;
 }
 

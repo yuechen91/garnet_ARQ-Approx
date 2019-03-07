@@ -50,6 +50,13 @@
 class MessageBuffer;
 class flitBuffer;
 
+struct retransmission{
+	MsgPtr message;
+	MsgPtr flit;
+	RouteInfo route;
+	int protection;
+};
+
 class NetworkInterface : public ClockedObject, public Consumer
 {
   public:
@@ -85,6 +92,12 @@ class NetworkInterface : public ClockedObject, public Consumer
     int m_vc_round_robin; // For round robin scheduling
     flitBuffer *outFlitQueue; // For modeling link contention
     flitBuffer *outCreditQueue;
+/****************************************************/
+    std::vector<flit*> ackQueue;
+    std::vector<retransmission> Retran_Buffer;
+    std::vector<retransmission> ARQ_Buffer;
+    const float error_rate = 0.05;
+/****************************************************/
     int m_deadlock_threshold;
 
     NetworkLink *inNetLink;

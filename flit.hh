@@ -46,7 +46,7 @@ class flit
   public:
     flit() {}
     flit(int id, int vc, int vnet, RouteInfo route, int size,
-         MsgPtr msg_ptr, Cycles curTime, packet_type type);
+         MsgPtr msg_ptr, Cycles curTime, int protect, packet_type type);
 
     int get_outport() {return m_outport; }
     int get_size() { return m_size; }
@@ -62,6 +62,7 @@ class flit
     packet_type get_ack() {return m_ack; }
     std::pair<flit_stage, Cycles> get_stage() { return m_stage; }
     Cycles get_src_delay() { return src_delay; }
+    int get_protect() {return m_protect; }
 
     void set_outport(int port) { m_outport = port; }
     void set_time(Cycles time) { m_time = time; }
@@ -113,6 +114,7 @@ class flit
     packet_type m_ack;
     MsgPtr m_msg_ptr;
     int m_outport;
+    int m_protect;
     Cycles src_delay;
     std::pair<flit_stage, Cycles> m_stage;
 };

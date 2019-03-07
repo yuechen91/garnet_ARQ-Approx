@@ -35,7 +35,7 @@
 
 // Constructor for the flit
 flit::flit(int id, int  vc, int vnet, RouteInfo route, int size,
-    MsgPtr msg_ptr, Cycles curTime,packet_type type)
+    MsgPtr msg_ptr, Cycles curTime,int protect ,packet_type type)
 {
     m_size = size;
     m_msg_ptr = msg_ptr;
@@ -48,6 +48,7 @@ flit::flit(int id, int  vc, int vnet, RouteInfo route, int size,
     m_route = route;
     m_stage.first = I_;
     m_stage.second = m_time;
+    m_protect = protect;
     if(type==NORMAL__){
     	if (size == 1) {
         	m_type = HEAD_TAIL_;
